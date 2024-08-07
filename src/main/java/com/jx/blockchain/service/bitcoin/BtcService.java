@@ -15,6 +15,7 @@ import org.bitcoinj.script.Script;
 import org.bitcoinj.script.ScriptBuilder;
 import org.bitcoinj.script.ScriptOpCodes;
 import org.bitcoinj.wallet.DeterministicSeed;
+import org.bouncycastle.math.ec.ECPoint;
 import org.jetbrains.annotations.NotNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -31,6 +32,8 @@ import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.*;
+
+import static org.apache.commons.codec.digest.DigestUtils.sha256;
 
 @Service
 public class BtcService {
@@ -127,7 +130,10 @@ public class BtcService {
             DumpedPrivateKey dumpedPrivateKey = DumpedPrivateKey.fromBase58(netParams, privateKey);
             ecKey = dumpedPrivateKey.getKey();
         } else {
-            BigInteger privKey = Base58.decodeToBigInteger(privateKey);
+            if (privateKey.startsWith("0x")){
+                privateKey = privateKey.substring(2);
+            }
+            BigInteger privKey = new BigInteger(privateKey, 16);
             ecKey = ECKey.fromPrivate(privKey);
         }
         return ecKey;
@@ -150,11 +156,51 @@ public class BtcService {
             System.out.println(segwitAddress.getWitnessVersion());
             return segwitAddress.toBech32();
         } else if ("taproot".equals(addressType)) {
-            return "";
+            byte[] compressedPubKey = ecKey.getPubKey();
+            // 计算 tweak
+            byte[] decompressedKey = Arrays.copyOfRange(compressedPubKey, 1, compressedPubKey.length);
+            byte[] tweak = taggedHash("TapTweak", decompressedKey);
+            ECPoint P = ecKey.getPubKeyPoint();
+            System.out.println(P.getXCoord().toBigInteger());
+            ECPoint pubKeyPoint = ECKey.fromPrivate(new BigInteger(1, tweak)).getPubKeyPoint();
+            System.out.println(pubKeyPoint.getXCoord().toBigInteger());
+            ECPoint Q = P.add(pubKeyPoint);
+            System.out.println(Q.getXCoord().toBigInteger());
+            byte[] tweakedPubKey = Q.getEncoded(true);
+            // 调整公钥
+            // Witness program
+            byte[] program = new byte[32];
+            System.arraycopy(tweakedPubKey, 1, program, 0, 32);
+
+            // 使用 Bech32 编码生成地址
+            SegwitAddress segwitAddress = SegwitAddress.fromProgram(netParams, 1, program);
+            return segwitAddress.toBech32();
         }
         return "";
     }
 
+    private static final Map<String, byte[]> TAGGED_HASH_PREFIXES = new HashMap<>();
+    public static byte[] taggedHash(String tag, byte[]... messages) {
+        byte[] tagPrefix = TAGGED_HASH_PREFIXES.get(tag);
+        if (tagPrefix == null) {
+            byte[] tagHash = sha256(tag.getBytes());
+            tagPrefix = concatBytes(tagHash, tagHash);
+            TAGGED_HASH_PREFIXES.put(tag, tagPrefix);
+        }
+        byte[] concatenated = concatBytes(tagPrefix, concatBytes(messages));
+        return sha256(concatenated);
+    }
+
+    private static byte[] concatBytes(byte[]... arrays) {
+        int totalLength = Arrays.stream(arrays).mapToInt(arr -> arr.length).sum();
+        byte[] result = new byte[totalLength];
+        int currentPos = 0;
+        for (byte[] arr : arrays) {
+            System.arraycopy(arr, 0, result, currentPos, arr.length);
+            currentPos += arr.length;
+        }
+        return result;
+    }
     /**
      * 查询交易详情
      *
