@@ -13,8 +13,8 @@ import org.bitcoinj.params.MainNetParams;
 import org.bitcoinj.params.TestNet3Params;
 import org.bitcoinj.script.Script;
 import org.bitcoinj.script.ScriptBuilder;
-import org.bitcoinj.script.ScriptOpCodes;
 import org.bitcoinj.wallet.DeterministicSeed;
+import org.bouncycastle.math.ec.ECFieldElement;
 import org.bouncycastle.math.ec.ECPoint;
 import org.jetbrains.annotations.NotNull;
 import org.slf4j.Logger;
@@ -27,7 +27,6 @@ import java.math.BigInteger;
 import java.math.RoundingMode;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.nio.ByteBuffer;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
@@ -38,13 +37,13 @@ import static org.apache.commons.codec.digest.DigestUtils.sha256;
 @Service
 public class BtcService {
     // 主网
-//    private final static String rpcUrl = "";
-//    private final static NetworkParameters netParams = MainNetParams.get();
-//    private final static int coinType = 0;
+    private final static String rpcUrl = "";
+    private final static NetworkParameters netParams = MainNetParams.get();
+    private final static int coinType = 0;
     // 测试网
-    private final static String rpcUrl = "https://compatible-practical-brook.btc-testnet.quiknode.pro/380ff48fb938e2e6d82571ddecdfdfa14887f8e0/";
-    private final static NetworkParameters netParams = TestNet3Params.get();
-    private final static int coinType = 1;
+//    private final static String rpcUrl = "https://compatible-practical-brook.btc-testnet.quiknode.pro/380ff48fb938e2e6d82571ddecdfdfa14887f8e0/";
+//    private final static NetworkParameters netParams = TestNet3Params.get();
+//    private final static int coinType = 1;
 
     private final Logger logger = LoggerFactory.getLogger(getClass());
 
@@ -130,7 +129,7 @@ public class BtcService {
             DumpedPrivateKey dumpedPrivateKey = DumpedPrivateKey.fromBase58(netParams, privateKey);
             ecKey = dumpedPrivateKey.getKey();
         } else {
-            if (privateKey.startsWith("0x")){
+            if (privateKey.startsWith("0x")) {
                 privateKey = privateKey.substring(2);
             }
             BigInteger privKey = new BigInteger(privateKey, 16);
@@ -142,36 +141,30 @@ public class BtcService {
     private String getBtcAddress(String addressType, ECKey ecKey) {
         if ("Legacy".equals(addressType)) {
             LegacyAddress legacyAddress = LegacyAddress.fromKey(netParams, ecKey);
-            System.out.println(legacyAddress.getVersion());
             return legacyAddress.toBase58();
         } else if ("segwit_nested".equals(addressType)) {
             LegacyAddress legacyAddress = LegacyAddress.fromScriptHash(netParams,
                     Utils.sha256hash160(ScriptBuilder
                             .createP2WPKHOutputScript(ecKey.getPubKeyHash())
                             .getProgram()));
-            System.out.println(legacyAddress.getVersion());
             return legacyAddress.toBase58();
         } else if ("segwit_native".equals(addressType)) {
             SegwitAddress segwitAddress = SegwitAddress.fromKey(netParams, ecKey);
-            System.out.println(segwitAddress.getWitnessVersion());
             return segwitAddress.toBech32();
         } else if ("taproot".equals(addressType)) {
             byte[] compressedPubKey = ecKey.getPubKey();
             // 计算 tweak
             byte[] decompressedKey = Arrays.copyOfRange(compressedPubKey, 1, compressedPubKey.length);
             byte[] tweak = taggedHash("TapTweak", decompressedKey);
-            ECPoint P = ecKey.getPubKeyPoint();
-            System.out.println(P.getXCoord().toBigInteger());
+            ECPoint P = liftX(ecKey.getPubKeyPoint());
+
             ECPoint pubKeyPoint = ECKey.fromPrivate(new BigInteger(1, tweak)).getPubKeyPoint();
-            System.out.println(pubKeyPoint.getXCoord().toBigInteger());
             ECPoint Q = P.add(pubKeyPoint);
-            System.out.println(Q.getXCoord().toBigInteger());
             byte[] tweakedPubKey = Q.getEncoded(true);
             // 调整公钥
             // Witness program
             byte[] program = new byte[32];
             System.arraycopy(tweakedPubKey, 1, program, 0, 32);
-
             // 使用 Bech32 编码生成地址
             SegwitAddress segwitAddress = SegwitAddress.fromProgram(netParams, 1, program);
             return segwitAddress.toBech32();
@@ -180,6 +173,7 @@ public class BtcService {
     }
 
     private static final Map<String, byte[]> TAGGED_HASH_PREFIXES = new HashMap<>();
+
     public static byte[] taggedHash(String tag, byte[]... messages) {
         byte[] tagPrefix = TAGGED_HASH_PREFIXES.get(tag);
         if (tagPrefix == null) {
@@ -201,6 +195,69 @@ public class BtcService {
         }
         return result;
     }
+
+    private static final BigInteger P = new BigInteger("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F", 16);
+    private static final BigInteger _0n = BigInteger.ZERO;
+    private static final BigInteger _2n = BigInteger.TWO;
+    private static final BigInteger _3n = new BigInteger("3");
+    private static final BigInteger _6n = new BigInteger("6");
+    private static final BigInteger _7n = new BigInteger("7");
+    private static final BigInteger _11n = new BigInteger("11");
+    private static final BigInteger _22n = new BigInteger("22");
+    private static final BigInteger _23n = new BigInteger("23");
+    private static final BigInteger _44n = new BigInteger("44");
+    private static final BigInteger _88n = new BigInteger("88");
+
+    public static ECPoint liftX(ECPoint ecPoint) {
+        ECFieldElement xCoord = ecPoint.getXCoord();
+        BigInteger x = xCoord.toBigInteger();
+        if (x.compareTo(_0n) <= 0 || x.compareTo(P) >= 0) {
+            throw new IllegalArgumentException("bad x: need 0 < x < P");
+        }
+        BigInteger xx = modP(x.multiply(x));
+        BigInteger c = modP(xx.multiply(x).add(_7n));
+        BigInteger y = sqrtMod(c);
+        if (!y.mod(_2n).equals(_0n)) y = modP(y.negate());
+        ecPoint.getCurve().createPoint(x, y);
+        return ecPoint.getCurve().createPoint(x, y);
+    }
+
+    public static BigInteger modP(BigInteger a) {
+        BigInteger result = a.mod(P);
+        return result.compareTo(_0n) > 0 ? result : P.add(result);
+    }
+
+    public static BigInteger sqrtMod(BigInteger y) {
+        BigInteger b2 = (y.multiply(y).multiply(y)).mod(P); // y^3
+        BigInteger b3 = b2.multiply(b2).multiply(y).mod(P); // y^7
+        BigInteger b6 = pow2(b3, _3n, P).multiply(b3).mod(P);
+        BigInteger b9 = pow2(b6, _3n, P).multiply(b3).mod(P);
+        BigInteger b11 = pow2(b9, _2n, P).multiply(b2).mod(P);
+        BigInteger b22 = pow2(b11, _11n, P).multiply(b11).mod(P);
+        BigInteger b44 = pow2(b22, _22n, P).multiply(b22).mod(P);
+        BigInteger b88 = pow2(b44, _44n, P).multiply(b44).mod(P);
+        BigInteger b176 = pow2(b88, _88n, P).multiply(b88).mod(P);
+        BigInteger b220 = pow2(b176, _44n, P).multiply(b44).mod(P);
+        BigInteger b223 = pow2(b220, _3n, P).multiply(b3).mod(P);
+        BigInteger t1 = pow2(b223, _23n, P).multiply(b22).mod(P);
+        BigInteger t2 = pow2(t1, _6n, P).multiply(b2).mod(P);
+        BigInteger root = pow2(t2, _2n, P);
+
+        if (!y.equals(root.modPow(_2n, P))) {
+            throw new IllegalArgumentException("Cannot find square root");
+        }
+        return root;
+    }
+
+    public static BigInteger pow2(BigInteger x, BigInteger power, BigInteger modulo) {
+        BigInteger res = x;
+        while (power.signum() > 0) {
+            res = res.multiply(res).mod(modulo);
+            power = power.subtract(BigInteger.ONE);
+        }
+        return res;
+    }
+
     /**
      * 查询交易详情
      *
