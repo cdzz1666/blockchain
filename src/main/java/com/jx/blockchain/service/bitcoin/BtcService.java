@@ -37,13 +37,13 @@ import static org.apache.commons.codec.digest.DigestUtils.sha256;
 @Service
 public class BtcService {
     // 主网
-    private final static String rpcUrl = "";
-    private final static NetworkParameters netParams = MainNetParams.get();
-    private final static int coinType = 0;
+//    private final static String rpcUrl = "";
+//    private final static NetworkParameters netParams = MainNetParams.get();
+//    private final static int coinType = 0;
     // 测试网
-//    private final static String rpcUrl = "https://compatible-practical-brook.btc-testnet.quiknode.pro/380ff48fb938e2e6d82571ddecdfdfa14887f8e0/";
-//    private final static NetworkParameters netParams = TestNet3Params.get();
-//    private final static int coinType = 1;
+    private final static String rpcUrl = "https://compatible-practical-brook.btc-testnet.quiknode.pro/380ff48fb938e2e6d82571ddecdfdfa14887f8e0/";
+    private final static NetworkParameters netParams = TestNet3Params.get();
+    private final static int coinType = 1;
 
     private final Logger logger = LoggerFactory.getLogger(getClass());
 
@@ -337,7 +337,10 @@ public class BtcService {
             JSONObject chainStats = resObj.getJSONObject("chain_stats");
             String fundedTxoSum = chainStats.getString("funded_txo_sum");
             String spentTxoSum = chainStats.getString("spent_txo_sum");
-            return JxResponse.success(new BigDecimal(fundedTxoSum).subtract(new BigDecimal(spentTxoSum)));
+            JSONObject memStats = resObj.getJSONObject("mempool_stats");
+            String memFundedTxoSum = memStats.getString("funded_txo_sum");
+            String memSpentTxoSum = memStats.getString("spent_txo_sum");
+            return JxResponse.success(new BigDecimal(fundedTxoSum).subtract(new BigDecimal(spentTxoSum)).subtract(new BigDecimal(memSpentTxoSum)));
         } catch (Exception e) {
             System.err.println(e.getMessage());
             return JxResponse.error(500, "网络异常");
@@ -381,7 +384,7 @@ public class BtcService {
 
             if (remainAmount.compareTo(BigDecimal.ZERO) > 0) {
                 // 找零
-                Address changeAddress = Address.fromKey(netParams, ecKey, Script.ScriptType.P2WPKH);
+                Address changeAddress = Address.fromString(netParams, fromAddress);
                 Coin change = Coin.valueOf(remainAmount.longValue());
                 tx.addOutput(change, changeAddress);
             }
@@ -402,6 +405,22 @@ public class BtcService {
                     ECKey.ECDSASignature ecSig = ecKey.sign(hash);
                     TransactionSignature txSig = new TransactionSignature(ecSig, Transaction.SigHash.ALL, false);
                     txInput.setScriptSig(ScriptBuilder.createInputScript(txSig, ecKey));
+                }
+                if (from.getOutputScriptType() == Script.ScriptType.P2SH) {
+                    Script redeemScript = ScriptBuilder
+                            .createP2WPKHOutputScript(ecKey.getPubKeyHash());
+                    String redeemScriptHex =Utils.HEX.encode(redeemScript.getProgram());
+                    byte[] redeemScriptBytes = Utils.HEX.decode(redeemScriptHex);
+                    byte[] prefixedScript = new byte[redeemScriptBytes.length + 1];
+                    prefixedScript[0] = 0x16;
+                    System.arraycopy(redeemScriptBytes, 0, prefixedScript, 1, redeemScriptBytes.length);
+                    Script scriptWithPrefix = new Script(prefixedScript);
+                    txInput.setScriptSig(scriptWithPrefix);
+                    Script witnessScript = ScriptBuilder.createP2PKHOutputScript(ecKey);
+                    Sha256Hash hash = tx.hashForWitnessSignature(i, witnessScript, txInput.getValue(), Transaction.SigHash.ALL, false);
+                    ECKey.ECDSASignature ecSig = ecKey.sign(hash);
+                    TransactionSignature txSig = new TransactionSignature(ecSig, Transaction.SigHash.ALL, false);
+                    txInput.setWitness(TransactionWitness.redeemP2WPKH(txSig, ecKey));
                 }
             }
             int vSize = tx.getVsize();
@@ -452,7 +471,7 @@ public class BtcService {
 
             if (remainAmount.compareTo(BigDecimal.ZERO) > 0) {
                 // 找零
-                Address changeAddress = Address.fromKey(netParams, ecKey, Script.ScriptType.P2WPKH);
+                Address changeAddress = Address.fromString(netParams, fromAddress);
                 Coin change = Coin.valueOf(remainAmount.longValue());
                 tx.addOutput(change, changeAddress);
             }
@@ -473,6 +492,22 @@ public class BtcService {
                     ECKey.ECDSASignature ecSig = ecKey.sign(hash);
                     TransactionSignature txSig = new TransactionSignature(ecSig, Transaction.SigHash.ALL, false);
                     txInput.setScriptSig(ScriptBuilder.createInputScript(txSig, ecKey));
+                }
+                if (from.getOutputScriptType() == Script.ScriptType.P2SH) {
+                    Script redeemScript = ScriptBuilder
+                            .createP2WPKHOutputScript(ecKey.getPubKeyHash());
+                    String redeemScriptHex =Utils.HEX.encode(redeemScript.getProgram());
+                    byte[] redeemScriptBytes = Utils.HEX.decode(redeemScriptHex);
+                    byte[] prefixedScript = new byte[redeemScriptBytes.length + 1];
+                    prefixedScript[0] = 0x16;
+                    System.arraycopy(redeemScriptBytes, 0, prefixedScript, 1, redeemScriptBytes.length);
+                    Script scriptWithPrefix = new Script(prefixedScript);
+                    txInput.setScriptSig(scriptWithPrefix);
+                    Script witnessScript = ScriptBuilder.createP2PKHOutputScript(ecKey);
+                    Sha256Hash hash = tx.hashForWitnessSignature(i, witnessScript, txInput.getValue(), Transaction.SigHash.ALL, false);
+                    ECKey.ECDSASignature ecSig = ecKey.sign(hash);
+                    TransactionSignature txSig = new TransactionSignature(ecSig, Transaction.SigHash.ALL, false);
+                    txInput.setWitness(TransactionWitness.redeemP2WPKH(txSig, ecKey));
                 }
             }
 
