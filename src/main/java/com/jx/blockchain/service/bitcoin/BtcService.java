@@ -4,6 +4,8 @@ import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONArray;
 import com.alibaba.fastjson.JSONObject;
 import com.google.common.collect.ImmutableList;
+import com.jx.blockchain.service.bitcoin.utils.SchnorrSignature;
+import com.jx.blockchain.service.bitcoin.utils.TaprootSigHashBuilder;
 import com.jx.blockchain.service.bitcoin.vo.*;
 import com.jx.blockchain.utils.ListUtils;
 import com.jx.blockchain.vo.*;
@@ -13,8 +15,9 @@ import org.bitcoinj.params.MainNetParams;
 import org.bitcoinj.params.TestNet3Params;
 import org.bitcoinj.script.Script;
 import org.bitcoinj.script.ScriptBuilder;
-import org.bitcoinj.script.ScriptOpCodes;
 import org.bitcoinj.wallet.DeterministicSeed;
+import org.bouncycastle.math.ec.ECFieldElement;
+import org.bouncycastle.math.ec.ECPoint;
 import org.jetbrains.annotations.NotNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -27,10 +30,15 @@ import java.math.RoundingMode;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.*;
+
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.jx.blockchain.service.bitcoin.utils.SchnorrSignature.*;
+import static org.apache.commons.codec.digest.DigestUtils.sha256;
 
 @Service
 public class BtcService {
@@ -39,7 +47,7 @@ public class BtcService {
 //    private final static NetworkParameters netParams = MainNetParams.get();
 //    private final static int coinType = 0;
     // 测试网
-    private final static String rpcUrl = "https://compatible-practical-brook.btc-testnet.quiknode.pro/380ff48fb938e2e6d82571ddecdfdfa14887f8e0/";
+    private final static String rpcUrl = "https://go.getblock.io/0eab528f22954ac0bd4ba38a603be082";
     private final static NetworkParameters netParams = TestNet3Params.get();
     private final static int coinType = 1;
 
@@ -54,9 +62,7 @@ public class BtcService {
         } else if ("taproot".equals(addressType)) {
             purpose = 86;
         }
-        return ImmutableList.of(new ChildNumber(purpose, true),
-                new ChildNumber(coinType, true),
-                ChildNumber.ZERO_HARDENED, ChildNumber.ZERO);
+        return ImmutableList.of(new ChildNumber(purpose, true), new ChildNumber(coinType, true), ChildNumber.ZERO_HARDENED, ChildNumber.ZERO);
     }
 
     /**
@@ -78,8 +84,7 @@ public class BtcService {
             byte[] seed = MnemonicCode.toSeed(mnemonicList, "");
             DeterministicKey masterPrivateKey = HDKeyDerivation.createMasterPrivateKey(seed);
             DeterministicHierarchy deterministicHierarchy = new DeterministicHierarchy(masterPrivateKey);
-            DeterministicKey deterministicKey = deterministicHierarchy
-                    .deriveChild(hdPath, false, true, new ChildNumber(0));
+            DeterministicKey deterministicKey = deterministicHierarchy.deriveChild(hdPath, false, true, new ChildNumber(0));
             byte[] bytes = deterministicKey.getPrivKeyBytes();
             ECKey ecKey = ECKey.fromPrivate(bytes);
             System.out.println(String.join(" ", mnemonicList));
@@ -97,11 +102,11 @@ public class BtcService {
             byte[] seed = MnemonicCode.toSeed(mnemonicList, "");
             DeterministicKey masterPrivateKey = HDKeyDerivation.createMasterPrivateKey(seed);
             DeterministicHierarchy deterministicHierarchy = new DeterministicHierarchy(masterPrivateKey);
-            DeterministicKey deterministicKey = deterministicHierarchy
-                    .deriveChild(getHdPath(addressType), false, true, new ChildNumber(0));
+            DeterministicKey deterministicKey = deterministicHierarchy.deriveChild(getHdPath(addressType), false, true, new ChildNumber(0));
             byte[] bytes = deterministicKey.getPrivKeyBytes();
             ECKey ecKey = ECKey.fromPrivate(bytes);
             System.out.println(ecKey.getPrivateKeyAsWiF(netParams));
+            System.out.println(ecKey.getPrivateKeyAsHex());
             return getBtcAddress(addressType, ecKey);
         } catch (Exception e) {
             System.err.println(e.getMessage());
@@ -127,7 +132,10 @@ public class BtcService {
             DumpedPrivateKey dumpedPrivateKey = DumpedPrivateKey.fromBase58(netParams, privateKey);
             ecKey = dumpedPrivateKey.getKey();
         } else {
-            BigInteger privKey = Base58.decodeToBigInteger(privateKey);
+            if (privateKey.startsWith("0x")) {
+                privateKey = privateKey.substring(2);
+            }
+            BigInteger privKey = new BigInteger(privateKey, 16);
             ecKey = ECKey.fromPrivate(privKey);
         }
         return ecKey;
@@ -136,23 +144,167 @@ public class BtcService {
     private String getBtcAddress(String addressType, ECKey ecKey) {
         if ("Legacy".equals(addressType)) {
             LegacyAddress legacyAddress = LegacyAddress.fromKey(netParams, ecKey);
-            System.out.println(legacyAddress.getVersion());
             return legacyAddress.toBase58();
         } else if ("segwit_nested".equals(addressType)) {
-            LegacyAddress legacyAddress = LegacyAddress.fromScriptHash(netParams,
-                    Utils.sha256hash160(ScriptBuilder
-                            .createP2WPKHOutputScript(ecKey.getPubKeyHash())
-                            .getProgram()));
-            System.out.println(legacyAddress.getVersion());
+            LegacyAddress legacyAddress = LegacyAddress.fromScriptHash(netParams, Utils.sha256hash160(ScriptBuilder.createP2WPKHOutputScript(ecKey.getPubKeyHash()).getProgram()));
             return legacyAddress.toBase58();
         } else if ("segwit_native".equals(addressType)) {
             SegwitAddress segwitAddress = SegwitAddress.fromKey(netParams, ecKey);
-            System.out.println(segwitAddress.getWitnessVersion());
             return segwitAddress.toBech32();
         } else if ("taproot".equals(addressType)) {
-            return "";
+            byte[] compressedPubKey = ecKey.getPubKey();
+            // 计算 tweak
+            byte[] decompressedKey = Arrays.copyOfRange(compressedPubKey, 1, compressedPubKey.length);
+            byte[] tweak = taggedHash("TapTweak", decompressedKey);
+            ECPoint P = liftX(ecKey.getPubKeyPoint());
+
+            ECPoint pubKeyPoint = ECKey.fromPrivate(new BigInteger(1, tweak)).getPubKeyPoint();
+            ECPoint Q = P.add(pubKeyPoint);
+            byte[] tweakedPubKey = Q.getEncoded(true);
+            // 调整公钥
+            // Witness program
+            byte[] program = new byte[32];
+            System.arraycopy(tweakedPubKey, 1, program, 0, 32);
+            // 使用 Bech32 编码生成地址
+            SegwitAddress segwitAddress = SegwitAddress.fromProgram(netParams, 1, program);
+            return segwitAddress.toBech32();
         }
         return "";
+    }
+
+    public static byte[] tweakPrivateKey(ECKey ecKey) {
+        byte[] compressedPubKey = ecKey.getPrivKeyBytes();
+        // 计算 tweak
+        ECPoint P = ecKey.getPubKeyPoint();
+        BigInteger d = hasEvenY(P) ? new BigInteger(1, compressedPubKey) : N.subtract(new BigInteger(1, compressedPubKey));
+        byte[] xP = bytesFromInt(P.getXCoord().toBigInteger());
+        BigInteger t = new BigInteger(1, taggedHash("TapTweak", xP, new byte[0]));
+        BigInteger mod = mod(d.add(t), N);
+        byte[] bytes = numberToBytesBE(mod, 32);
+        System.out.println(Utils.HEX.encode(bytes));
+        return bytes;
+    }
+
+    public static byte[] numberToBytesBE(BigInteger number, int length) {
+        ByteBuffer buffer = ByteBuffer.allocate(length);
+        buffer.order(ByteOrder.BIG_ENDIAN);
+        buffer.put(number.toByteArray());
+        return buffer.array();
+    }
+
+    private static byte[] getAuxRand() {
+        byte[] rand = new byte[32];
+        new SecureRandom().nextBytes(rand);
+        return rand;
+    }
+
+    private static boolean hasEvenY(ECPoint P) {
+        return P.getAffineYCoord().toBigInteger().mod(BigInteger.TWO).equals(BigInteger.ZERO);
+    }
+
+    private static final Map<String, byte[]> TAGGED_HASH_PREFIXES = new HashMap<>();
+
+    public static byte[] taggedHash(String tag, byte[]... messages) {
+        byte[] tagPrefix = TAGGED_HASH_PREFIXES.get(tag);
+        if (tagPrefix == null) {
+            byte[] tagHash = sha256(tag.getBytes());
+            tagPrefix = concatBytes(tagHash, tagHash);
+            TAGGED_HASH_PREFIXES.put(tag, tagPrefix);
+        }
+        byte[] concatenated = concatBytes(tagPrefix, concatBytes(messages));
+        return sha256(concatenated);
+    }
+
+    public static byte[] concatBytes(byte[]... arrays) {
+        int totalLength = Arrays.stream(arrays).mapToInt(arr -> arr.length).sum();
+        byte[] result = new byte[totalLength];
+        int currentPos = 0;
+        for (byte[] arr : arrays) {
+            System.arraycopy(arr, 0, result, currentPos, arr.length);
+            currentPos += arr.length;
+        }
+        return result;
+    }
+
+    private static final BigInteger P = new BigInteger("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F", 16);
+    private static final BigInteger N = new BigInteger("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141", 16);
+    private static final BigInteger _0n = BigInteger.ZERO;
+    private static final BigInteger _2n = BigInteger.TWO;
+    private static final BigInteger _3n = new BigInteger("3");
+    private static final BigInteger _6n = new BigInteger("6");
+    private static final BigInteger _7n = new BigInteger("7");
+    private static final BigInteger _11n = new BigInteger("11");
+    private static final BigInteger _22n = new BigInteger("22");
+    private static final BigInteger _23n = new BigInteger("23");
+    private static final BigInteger _44n = new BigInteger("44");
+    private static final BigInteger _88n = new BigInteger("88");
+
+    public static ECPoint liftX(ECPoint ecPoint) {
+        ECFieldElement xCoord = ecPoint.getXCoord();
+        BigInteger x = xCoord.toBigInteger();
+        if (x.compareTo(_0n) <= 0 || x.compareTo(P) >= 0) {
+            throw new IllegalArgumentException("bad x: need 0 < x < P");
+        }
+        BigInteger xx = modP(x.multiply(x));
+        BigInteger c = modP(xx.multiply(x).add(_7n));
+        BigInteger y = sqrtMod(c);
+        if (!y.mod(_2n).equals(_0n)) y = modP(y.negate());
+        ecPoint.getCurve().createPoint(x, y);
+        return ecPoint.getCurve().createPoint(x, y);
+    }
+
+    public static Point liftX(byte[] pubkey) {
+        BigInteger x = new BigInteger(1, pubkey);
+
+        if (x.compareTo(_0n) <= 0 || x.compareTo(P) >= 0) {
+            throw new IllegalArgumentException("bad x: need 0 < x < P");
+        }
+        BigInteger xx = modP(x.multiply(x));
+        BigInteger c = modP(xx.multiply(x).add(_7n));
+        BigInteger y = sqrtMod(c);
+        if (!y.mod(_2n).equals(_0n)) y = modP(y.negate());
+        return new Point(x, y);
+    }
+
+    public static BigInteger modP(BigInteger a) {
+        BigInteger result = a.mod(P);
+        return result.compareTo(_0n) > 0 ? result : P.add(result);
+    }
+
+    public static BigInteger mod(BigInteger a, BigInteger b) {
+        BigInteger result = a.mod(b);
+        return result.compareTo(_0n) > 0 ? result : b.add(result);
+    }
+
+    public static BigInteger sqrtMod(BigInteger y) {
+        BigInteger b2 = (y.multiply(y).multiply(y)).mod(P); // y^3
+        BigInteger b3 = b2.multiply(b2).multiply(y).mod(P); // y^7
+        BigInteger b6 = pow2(b3, _3n, P).multiply(b3).mod(P);
+        BigInteger b9 = pow2(b6, _3n, P).multiply(b3).mod(P);
+        BigInteger b11 = pow2(b9, _2n, P).multiply(b2).mod(P);
+        BigInteger b22 = pow2(b11, _11n, P).multiply(b11).mod(P);
+        BigInteger b44 = pow2(b22, _22n, P).multiply(b22).mod(P);
+        BigInteger b88 = pow2(b44, _44n, P).multiply(b44).mod(P);
+        BigInteger b176 = pow2(b88, _88n, P).multiply(b88).mod(P);
+        BigInteger b220 = pow2(b176, _44n, P).multiply(b44).mod(P);
+        BigInteger b223 = pow2(b220, _3n, P).multiply(b3).mod(P);
+        BigInteger t1 = pow2(b223, _23n, P).multiply(b22).mod(P);
+        BigInteger t2 = pow2(t1, _6n, P).multiply(b2).mod(P);
+        BigInteger root = pow2(t2, _2n, P);
+
+        if (!y.equals(root.modPow(_2n, P))) {
+            throw new IllegalArgumentException("Cannot find square root");
+        }
+        return root;
+    }
+
+    public static BigInteger pow2(BigInteger x, BigInteger power, BigInteger modulo) {
+        BigInteger res = x;
+        while (power.signum() > 0) {
+            res = res.multiply(res).mod(modulo);
+            power = power.subtract(BigInteger.ONE);
+        }
+        return res;
     }
 
     /**
@@ -207,8 +359,7 @@ public class BtcService {
         JxResponse memoryInfo = getMemoryPoolInfo();
         System.out.println(memoryInfo.data());
         JSONObject jsonObject = JSONObject.parseObject(memoryInfo.data().toString());
-        BigDecimal feeRate = (jsonObject.getBigDecimal("minrelaytxfee").add(jsonObject.getBigDecimal("mempoolminfee")))
-                .multiply(BigDecimal.TEN.pow(8)).divide(BigDecimal.valueOf(1024), 0, RoundingMode.CEILING);
+        BigDecimal feeRate = (jsonObject.getBigDecimal("minrelaytxfee").add(jsonObject.getBigDecimal("mempoolminfee"))).multiply(BigDecimal.TEN.pow(8)).divide(BigDecimal.valueOf(1024), 0, RoundingMode.CEILING);
         if (feeRate.compareTo(BigDecimal.valueOf(5)) < 0) {
             return feeRate.multiply(BigDecimal.valueOf(2));
         }
@@ -234,14 +385,17 @@ public class BtcService {
             JSONObject chainStats = resObj.getJSONObject("chain_stats");
             String fundedTxoSum = chainStats.getString("funded_txo_sum");
             String spentTxoSum = chainStats.getString("spent_txo_sum");
-            return JxResponse.success(new BigDecimal(fundedTxoSum).subtract(new BigDecimal(spentTxoSum)));
+            JSONObject memStats = resObj.getJSONObject("mempool_stats");
+            String memFundedTxoSum = memStats.getString("funded_txo_sum");
+            String memSpentTxoSum = memStats.getString("spent_txo_sum");
+            return JxResponse.success(new BigDecimal(fundedTxoSum).subtract(new BigDecimal(spentTxoSum)).subtract(new BigDecimal(memSpentTxoSum)));
         } catch (Exception e) {
             System.err.println(e.getMessage());
             return JxResponse.error(500, "网络异常");
         }
     }
 
-    public JxResponse estimateTxAmount(String fromAddress, String toAddress, BigDecimal transferAmount, String privateKey) {
+    public JxResponse calculateVsize(String fromAddress, String toAddress, BigDecimal transferAmount, String privateKey) {
         try {
             BigDecimal txAmount = BigDecimal.ZERO;
             BigDecimal reduceAmount = transferAmount.add(txAmount);
@@ -261,12 +415,14 @@ public class BtcService {
 
             BigDecimal utxoToalAmount = BigDecimal.ZERO;
             // 创建交易输入
+            Map<String, String> txidVoutScriptPub = new HashMap<>();
             for (int i = 0; i < transferList.size(); i++) {
                 Utxo utxo = transferList.get(i);
                 if (utxoToalAmount.compareTo(reduceAmount) > 0) break;
                 utxoToalAmount = utxoToalAmount.add(new BigDecimal(utxo.getCoinAmount()));
                 TransactionOutPoint outPoint = new TransactionOutPoint(netParams, utxo.getVout(), Sha256Hash.wrap(utxo.getTxid()));
                 TransactionInput input = new TransactionInput(netParams, null, new byte[]{}, outPoint, Coin.valueOf(new BigDecimal(utxo.getCoinAmount()).longValue()));
+                txidVoutScriptPub.put(utxo.getTxid() + ":" + utxo.getVout(), utxo.getScriptpubkey());
                 tx.addInput(input);
                 System.out.println(input.getValue());
             }
@@ -278,7 +434,7 @@ public class BtcService {
 
             if (remainAmount.compareTo(BigDecimal.ZERO) > 0) {
                 // 找零
-                Address changeAddress = Address.fromKey(netParams, ecKey, Script.ScriptType.P2WPKH);
+                Address changeAddress = Address.fromString(netParams, fromAddress);
                 Coin change = Coin.valueOf(remainAmount.longValue());
                 tx.addOutput(change, changeAddress);
             }
@@ -300,9 +456,32 @@ public class BtcService {
                     TransactionSignature txSig = new TransactionSignature(ecSig, Transaction.SigHash.ALL, false);
                     txInput.setScriptSig(ScriptBuilder.createInputScript(txSig, ecKey));
                 }
+                if (from.getOutputScriptType() == Script.ScriptType.P2SH) {
+                    Script redeemScript = ScriptBuilder.createP2WPKHOutputScript(ecKey.getPubKeyHash());
+                    String redeemScriptHex = Utils.HEX.encode(redeemScript.getProgram());
+                    byte[] redeemScriptBytes = Utils.HEX.decode(redeemScriptHex);
+                    byte[] prefixedScript = new byte[redeemScriptBytes.length + 1];
+                    prefixedScript[0] = 0x16;
+                    System.arraycopy(redeemScriptBytes, 0, prefixedScript, 1, redeemScriptBytes.length);
+                    Script scriptWithPrefix = new Script(prefixedScript);
+                    txInput.setScriptSig(scriptWithPrefix);
+                    Script witnessScript = ScriptBuilder.createP2PKHOutputScript(ecKey);
+                    Sha256Hash hash = tx.hashForWitnessSignature(i, witnessScript, txInput.getValue(), Transaction.SigHash.ALL, false);
+                    ECKey.ECDSASignature ecSig = ecKey.sign(hash);
+                    TransactionSignature txSig = new TransactionSignature(ecSig, Transaction.SigHash.ALL, false);
+                    txInput.setWitness(TransactionWitness.redeemP2WPKH(txSig, ecKey));
+                }
+                if (from.getOutputScriptType() == Script.ScriptType.P2TR) {
+                    String taprootMessageHex = TaprootSigHashBuilder.createTaprootMessageHex(netParams, tx, txidVoutScriptPub, i);
+                    System.out.println(taprootMessageHex);
+                    byte[] signedHash = SchnorrSignature.schnorrSign(Utils.HEX.decode(taprootMessageHex), Utils.HEX.encode(tweakPrivateKey(ecKey)));
+                    TransactionWitness witness = new TransactionWitness(1);
+                    witness.setPush(0, signedHash);
+                    txInput.setWitness(witness);
+                }
             }
             int vSize = tx.getVsize();
-            return JxResponse.success(getFeeRate().multiply(BigDecimal.valueOf(vSize)));
+            return JxResponse.success(vSize);
         } catch (Exception e) {
             logger.error("exception message", e);
             return JxResponse.error(500, "网络异常");
@@ -329,6 +508,7 @@ public class BtcService {
             Transaction tx = new Transaction(netParams);
 
             BigDecimal utxoToalAmount = BigDecimal.ZERO;
+            Map<String, String> txidVoutScriptPub = new HashMap<>();
             // 创建交易输入
             for (int i = 0; i < transferList.size(); i++) {
                 Utxo utxo = transferList.get(i);
@@ -336,6 +516,7 @@ public class BtcService {
                 utxoToalAmount = utxoToalAmount.add(new BigDecimal(utxo.getCoinAmount()));
                 TransactionOutPoint outPoint = new TransactionOutPoint(netParams, utxo.getVout(), Sha256Hash.wrap(utxo.getTxid()));
                 TransactionInput input = new TransactionInput(netParams, null, new byte[]{}, outPoint, Coin.valueOf(new BigDecimal(utxo.getCoinAmount()).longValue()));
+                txidVoutScriptPub.put(utxo.getTxid() + ":" + utxo.getVout(), utxo.getScriptpubkey());
                 tx.addInput(input);
                 System.out.println(input.getValue());
             }
@@ -349,7 +530,7 @@ public class BtcService {
 
             if (remainAmount.compareTo(BigDecimal.ZERO) > 0) {
                 // 找零
-                Address changeAddress = Address.fromKey(netParams, ecKey, Script.ScriptType.P2WPKH);
+                Address changeAddress = Address.fromString(netParams, fromAddress);
                 Coin change = Coin.valueOf(remainAmount.longValue());
                 tx.addOutput(change, changeAddress);
             }
@@ -370,6 +551,29 @@ public class BtcService {
                     ECKey.ECDSASignature ecSig = ecKey.sign(hash);
                     TransactionSignature txSig = new TransactionSignature(ecSig, Transaction.SigHash.ALL, false);
                     txInput.setScriptSig(ScriptBuilder.createInputScript(txSig, ecKey));
+                }
+                if (from.getOutputScriptType() == Script.ScriptType.P2SH) {
+                    Script redeemScript = ScriptBuilder.createP2WPKHOutputScript(ecKey.getPubKeyHash());
+                    String redeemScriptHex = Utils.HEX.encode(redeemScript.getProgram());
+                    byte[] redeemScriptBytes = Utils.HEX.decode(redeemScriptHex);
+                    byte[] prefixedScript = new byte[redeemScriptBytes.length + 1];
+                    prefixedScript[0] = 0x16;
+                    System.arraycopy(redeemScriptBytes, 0, prefixedScript, 1, redeemScriptBytes.length);
+                    Script scriptWithPrefix = new Script(prefixedScript);
+                    txInput.setScriptSig(scriptWithPrefix);
+                    Script witnessScript = ScriptBuilder.createP2PKHOutputScript(ecKey);
+                    Sha256Hash hash = tx.hashForWitnessSignature(i, witnessScript, txInput.getValue(), Transaction.SigHash.ALL, false);
+                    ECKey.ECDSASignature ecSig = ecKey.sign(hash);
+                    TransactionSignature txSig = new TransactionSignature(ecSig, Transaction.SigHash.ALL, false);
+                    txInput.setWitness(TransactionWitness.redeemP2WPKH(txSig, ecKey));
+                }
+                if (from.getOutputScriptType() == Script.ScriptType.P2TR) {
+                    String taprootMessageHex = TaprootSigHashBuilder.createTaprootMessageHex(netParams, tx, txidVoutScriptPub, i);
+                    System.out.println(taprootMessageHex);
+                    byte[] signedHash = SchnorrSignature.schnorrSign(Utils.HEX.decode(taprootMessageHex), Utils.HEX.encode(tweakPrivateKey(ecKey)));
+                    TransactionWitness witness = new TransactionWitness(1);
+                    witness.setPush(0, signedHash);
+                    txInput.setWitness(witness);
                 }
             }
 
@@ -395,6 +599,7 @@ public class BtcService {
             return JxResponse.error(500, "网络异常");
         }
     }
+
 
     public JxResponse postGetUtxo(String address) {
         try {
@@ -430,6 +635,10 @@ public class BtcService {
                         unspent.setVout(i);
                         unspent.setTxid(tx.getString("txid"));
                         unspent.setCoinAmount(vout.getString("value"));
+                        unspent.setScriptpubkeyAddress(vout.getString("scriptpubkey_address"));
+                        unspent.setScriptpubkey(vout.getString("scriptpubkey"));
+                        unspent.setScriptpubkeyAsm(vout.getString("scriptpubkey_asm"));
+                        unspent.setScriptpubkeyType(vout.getString("scriptpubkey_type"));
                         result.add(unspent);
                     }
                 }
@@ -442,8 +651,7 @@ public class BtcService {
         }
     }
 
-    public static String post(String url,
-                              String payload) throws IOException {
+    public static String post(String url, String payload) throws IOException {
         Map<String, String> headerMap = new HashMap<>();
         headerMap.put("Content-Type", "application/json");
         int timeout = 30000;
@@ -515,10 +723,7 @@ public class BtcService {
         return bos.toByteArray();
     }
 
-    public static String get(
-            String url,
-            Map<String, String> headerMap,
-            Map<String, ?> queryMap) throws IOException {
+    public static String get(String url, Map<String, String> headerMap, Map<String, ?> queryMap) throws IOException {
         HttpURLConnection conn = null;
         try {
             if (queryMap != null) {
@@ -560,42 +765,6 @@ public class BtcService {
         }
     }
 
+
 }
 
-class Utxo {
-    private String txid;
-    private int vout;
-    private String coinAmount;
-
-    public Utxo() {
-    }
-
-    public String getTxid() {
-        return txid;
-    }
-
-    public void setTxid(String txid) {
-        this.txid = txid;
-    }
-
-    public int getVout() {
-        return vout;
-    }
-
-    public void setVout(int vout) {
-        this.vout = vout;
-    }
-
-    public String getCoinAmount() {
-        return coinAmount;
-    }
-
-    public void setCoinAmount(String coinAmount) {
-        this.coinAmount = coinAmount;
-    }
-
-    @Override
-    public String toString() {
-        return JSON.toJSONString(this);
-    }
-}
