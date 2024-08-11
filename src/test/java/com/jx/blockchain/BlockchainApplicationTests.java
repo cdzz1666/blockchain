@@ -68,22 +68,28 @@ class BlockchainApplicationTests {
 
     @Test
     void btcTransfer() throws Exception {
-        // tb1qc0vnw6lygkkrxc9h60fhsewzmlpu39njt6dl2w tb1qfzlvcjw2jmvgwyr8refymgtx4fzasjwzeq8spw  P2WPKH
-        // mmFfrrhzzycDcVsv84gktJjygsJVEbRANu ms1wFwLt7QaBCH4wDg4f68kbCPFJvqMsRu  P2PKH
-        // cTbxhZmXYfUFwSBR2tDqjYpdgij8bxbxRwBUwwTwhUCyw1fjxDZE
-//        JxResponse txFee = btcService.estimateTxAmount(
-//                "tb1pvwl7ppkkvfe8kc5xt22s5qwlze2su6zxhlzwq8rk8eya3zckhpjslks0hx",
-//                "tb1pc84zlce2vetgwz4yv5wqkgj4kmngv68m3re8t3tuyz40xmwh7vss6jv86p",
-//                BigDecimal.valueOf(0.00002).multiply(BigDecimal.TEN.pow(8)),
-//                "cQXVsVscHk9ox8L8yC6bzXfnhCor9CAWbbGcYU2cwsGr4D7X79pW");
-//        System.out.println(txFee.data());
+        String fromAddress = "tb1pc84zlce2vetgwz4yv5wqkgj4kmngv68m3re8t3tuyz40xmwh7vss6jv86p";
+        String toAddress = "tb1pvwl7ppkkvfe8kc5xt22s5qwlze2su6zxhlzwq8rk8eya3zckhpjslks0hx";
+        String privateKey = "cTnCnSsJKq61G84XGWVnnhg1rX1XxFJbKqK5MQE476u9XEEKZcVT";
+        BigDecimal transferAmount = new BigDecimal("0.00002");
+        JxResponse vsizeRes = btcService.calculateVsize(
+                fromAddress,
+                toAddress,
+                transferAmount.multiply(BigDecimal.TEN.pow(8)),
+                privateKey);
+
+        System.out.println(vsizeRes.data());
+        BigDecimal feeRate = btcService.getFeeRate();
+        System.out.println(feeRate);
+        BigDecimal feeAmount = feeRate.multiply(new BigDecimal(vsizeRes.data().toString()));
+        System.out.println(feeAmount);
         JxResponse transfer = btcService.transfer(
-                "tb1pvwl7ppkkvfe8kc5xt22s5qwlze2su6zxhlzwq8rk8eya3zckhpjslks0hx",
-                "tb1pc84zlce2vetgwz4yv5wqkgj4kmngv68m3re8t3tuyz40xmwh7vss6jv86p",
-                BigDecimal.valueOf(0.00002).multiply(BigDecimal.TEN.pow(8)),
+                fromAddress,
+                toAddress,
+                transferAmount.multiply(BigDecimal.TEN.pow(8)),
 //                new BigDecimal(txFee.data().toString()),
-                BigDecimal.valueOf(548),
-                "cQXVsVscHk9ox8L8yC6bzXfnhCor9CAWbbGcYU2cwsGr4D7X79pW");
+                feeAmount,
+                privateKey);
         System.out.println(transfer.data());
     }
 
@@ -126,13 +132,15 @@ class BlockchainApplicationTests {
 
     @Test
     void getUtxo() {
-        JxResponse jxResponse = btcService.postGetUtxo("tb1pvwl7ppkkvfe8kc5xt22s5qwlze2su6zxhlzwq8rk8eya3zckhpjslks0hx");
+        JxResponse jxResponse = btcService.postGetUtxo("tb1pc84zlce2vetgwz4yv5wqkgj4kmngv68m3re8t3tuyz40xmwh7vss6jv86p");
         System.out.println(jxResponse.data());
+        JxResponse balanceRes = btcService.getBalance("tb1pc84zlce2vetgwz4yv5wqkgj4kmngv68m3re8t3tuyz40xmwh7vss6jv86p");
+        System.out.println(balanceRes.data());
     }
 
     @Test
     void getBalance() {
-        JxResponse jxResponse = btcService.getBalance("tb1pvwl7ppkkvfe8kc5xt22s5qwlze2su6zxhlzwq8rk8eya3zckhpjslks0hx");
+        JxResponse jxResponse = btcService.getBalance("tb1pc84zlce2vetgwz4yv5wqkgj4kmngv68m3re8t3tuyz40xmwh7vss6jv86p");
         System.out.println(jxResponse.data());
     }
 

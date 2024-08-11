@@ -188,7 +188,17 @@ public class BtcService {
     public static byte[] numberToBytesBE(BigInteger number, int length) {
         ByteBuffer buffer = ByteBuffer.allocate(length);
         buffer.order(ByteOrder.BIG_ENDIAN);
-        buffer.put(number.toByteArray());
+        byte[] byteArray = number.toByteArray();
+        if (byteArray.length > length) {
+            // 如果 byteArray 的长度大于需要的长度，截取末尾部分
+            byteArray = Arrays.copyOfRange(byteArray, byteArray.length - length, byteArray.length);
+        } else if (byteArray.length < length) {
+            // 如果 byteArray 的长度小于需要的长度，在前面填充零
+            byte[] temp = new byte[length];
+            System.arraycopy(byteArray, 0, temp, length - byteArray.length, byteArray.length);
+            byteArray = temp;
+        }
+        buffer.put(byteArray);
         return buffer.array();
     }
 
