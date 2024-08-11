@@ -12,6 +12,7 @@ import org.bitcoinj.core.*;
 import org.bitcoinj.params.TestNet3Params;
 import org.bitcoinj.script.Script;
 import org.bitcoinj.script.ScriptBuilder;
+import org.bitcoinj.script.ScriptChunk;
 import org.bitcoinj.script.ScriptOpCodes;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -19,7 +20,10 @@ import org.tron.trident.proto.Chain;
 import org.tron.trident.proto.Response;
 
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.math.RoundingMode;
+
+import static org.apache.commons.codec.digest.DigestUtils.sha256;
 
 @SpringBootTest
 class BlockchainApplicationTests {
@@ -49,26 +53,37 @@ class BlockchainApplicationTests {
     void estimateBtcTxFee() throws Exception {
         // tb1qc0vnw6lygkkrxc9h60fhsewzmlpu39njt6dl2w tb1qfzlvcjw2jmvgwyr8refymgtx4fzasjwzeq8spw  P2WPKH
         // mmFfrrhzzycDcVsv84gktJjygsJVEbRANu ms1wFwLt7QaBCH4wDg4f68kbCPFJvqMsRu  P2PKH
-        JxResponse transfer = btcService.estimateTxAmount(
-                "tb1qc0vnw6lygkkrxc9h60fhsewzmlpu39njt6dl2w",
-                "tb1qfzlvcjw2jmvgwyr8refymgtx4fzasjwzeq8spw",
-                BigDecimal.valueOf(0.00002).multiply(BigDecimal.TEN.pow(8)), "");
-        System.out.println(transfer.data());
+        JxResponse vsizeRes = btcService.calculateVsize(
+                "tb1pvwl7ppkkvfe8kc5xt22s5qwlze2su6zxhlzwq8rk8eya3zckhpjslks0hx",
+                "tb1pc84zlce2vetgwz4yv5wqkgj4kmngv68m3re8t3tuyz40xmwh7vss6jv86p",
+                BigDecimal.valueOf(0.00002).multiply(BigDecimal.TEN.pow(8)),
+                "cQXVsVscHk9ox8L8yC6bzXfnhCor9CAWbbGcYU2cwsGr4D7X79pW");
+
+        System.out.println(vsizeRes.data());
+        BigDecimal feeRate = btcService.getFeeRate();
+        System.out.println(feeRate);
+        BigDecimal feeAmount = feeRate.multiply(new BigDecimal(vsizeRes.data().toString()));
+        System.out.println(feeAmount);
     }
 
     @Test
     void btcTransfer() throws Exception {
         // tb1qc0vnw6lygkkrxc9h60fhsewzmlpu39njt6dl2w tb1qfzlvcjw2jmvgwyr8refymgtx4fzasjwzeq8spw  P2WPKH
         // mmFfrrhzzycDcVsv84gktJjygsJVEbRANu ms1wFwLt7QaBCH4wDg4f68kbCPFJvqMsRu  P2PKH
-        JxResponse txFee = btcService.estimateTxAmount(
-                "mmFfrrhzzycDcVsv84gktJjygsJVEbRANu",
-                "ms1wFwLt7QaBCH4wDg4f68kbCPFJvqMsRu",
-                BigDecimal.valueOf(0.00002).multiply(BigDecimal.TEN.pow(8)), "cN3TVLUWf5nqLPUT1JL3ME48an2mfMFJG9JzLN6U6sR7hjEgoVgg");
-
+        // cTbxhZmXYfUFwSBR2tDqjYpdgij8bxbxRwBUwwTwhUCyw1fjxDZE
+//        JxResponse txFee = btcService.estimateTxAmount(
+//                "tb1pvwl7ppkkvfe8kc5xt22s5qwlze2su6zxhlzwq8rk8eya3zckhpjslks0hx",
+//                "tb1pc84zlce2vetgwz4yv5wqkgj4kmngv68m3re8t3tuyz40xmwh7vss6jv86p",
+//                BigDecimal.valueOf(0.00002).multiply(BigDecimal.TEN.pow(8)),
+//                "cQXVsVscHk9ox8L8yC6bzXfnhCor9CAWbbGcYU2cwsGr4D7X79pW");
+//        System.out.println(txFee.data());
         JxResponse transfer = btcService.transfer(
-                "mmFfrrhzzycDcVsv84gktJjygsJVEbRANu",
-                "ms1wFwLt7QaBCH4wDg4f68kbCPFJvqMsRu",
-                BigDecimal.valueOf(0.00002).multiply(BigDecimal.TEN.pow(8)), new BigDecimal(txFee.data().toString()), "cN3TVLUWf5nqLPUT1JL3ME48an2mfMFJG9JzLN6U6sR7hjEgoVgg");
+                "tb1pvwl7ppkkvfe8kc5xt22s5qwlze2su6zxhlzwq8rk8eya3zckhpjslks0hx",
+                "tb1pc84zlce2vetgwz4yv5wqkgj4kmngv68m3re8t3tuyz40xmwh7vss6jv86p",
+                BigDecimal.valueOf(0.00002).multiply(BigDecimal.TEN.pow(8)),
+//                new BigDecimal(txFee.data().toString()),
+                BigDecimal.valueOf(548),
+                "cQXVsVscHk9ox8L8yC6bzXfnhCor9CAWbbGcYU2cwsGr4D7X79pW");
         System.out.println(transfer.data());
     }
 
@@ -108,18 +123,21 @@ class BlockchainApplicationTests {
         System.out.println(Address.fromString(TestNet3Params.get(), "tb1qc0vnw6lygkkrxc9h60fhsewzmlpu39njt6dl2w").getOutputScriptType());
         System.out.println(Address.fromString(TestNet3Params.get(), "mmFfrrhzzycDcVsv84gktJjygsJVEbRANu").getOutputScriptType());
     }
+
     @Test
-    void getUtxo(){
-        JxResponse jxResponse = btcService.postGetUtxo("2N8bqgSygfC3s7Vc2t3GhyWruqj1SQKviNh");
-    }
-    @Test
-    void getBalance(){
-        JxResponse jxResponse = btcService.getBalance("15NeLd3Fsr8yKwSTbxUqVmz2wGUK48SsX2");
+    void getUtxo() {
+        JxResponse jxResponse = btcService.postGetUtxo("tb1pvwl7ppkkvfe8kc5xt22s5qwlze2su6zxhlzwq8rk8eya3zckhpjslks0hx");
         System.out.println(jxResponse.data());
     }
 
     @Test
-    void getTronTransaction(){
+    void getBalance() {
+        JxResponse jxResponse = btcService.getBalance("tb1pvwl7ppkkvfe8kc5xt22s5qwlze2su6zxhlzwq8rk8eya3zckhpjslks0hx");
+        System.out.println(jxResponse.data());
+    }
+
+    @Test
+    void getTronTransaction() {
         JxResponse transactionInfoById = tronService.getTransactionByIdSolidity("e1d2738d1c0e5278aa0e8628fa96589cb500325351593c73f1b485073d5a6dc9");
         Response.TransactionInfo transactionInfo = (Response.TransactionInfo) transactionInfoById.data();
         System.out.println(Response.TransactionInfo.code.SUCESS.equals(transactionInfo.getResult()));
@@ -130,5 +148,28 @@ class BlockchainApplicationTests {
         System.out.println(transactionInfo.getReceipt().getResult());
         boolean equals = Chain.Transaction.Result.contractResult.SUCCESS.equals(transactionInfo.getReceipt().getResult());
         System.out.println(equals);
+    }
+
+    @Test
+    void btcP2WSH() {
+//
+//        DumpedPrivateKey dumpedPrivateKey = DumpedPrivateKey.fromBase58(TestNet3Params.get(), "cQXVsVscHk9ox8L8yC6bzXfnhCor9CAWbbGcYU2cwsGr4D7X79pW");
+//        ECKey ecKey = dumpedPrivateKey.getKey();
+//
+//        Script redeemScript = ScriptBuilder
+//                .createP2WPKHOutputScript(ecKey.getPubKeyHash());
+//        Script lockingScript = ScriptBuilder.createP2SHOutputScript(redeemScript);
+//        System.out.println(redeemScript);
+//        System.out.println(lockingScript);
+//        System.out.println(Utils.HEX.encode(redeemScript.getProgram()));
+//        System.out.println(Utils.HEX.encode(lockingScript.getProgram()));
+
+        Address address = Address.fromString(TestNet3Params.get(), "tb1pvwl7ppkkvfe8kc5xt22s5qwlze2su6zxhlzwq8rk8eya3zckhpjslks0hx");
+        System.out.println(address);
+        System.out.println(address.getOutputScriptType());
+        byte[] sig_to_hash = Utils.HEX.decode("00000100000000000000df4ab7bc35fec96c25cb97506fd7573ebc2954d8ee7fd62a147763b87a15470cc86690d960173932b6a3be70f64b7b7e43b554b555f4cb809faf0e3cb621c98f01331bcaa5e5af1bf32f9f27d5f4197b1fa08e61f6ca5ef2e5c8073fe8b65bdc82d397cbbcff87bc5d0c4c70e424f9b830efbad7bf0be479da5d1d1bafdb97985ad5d604b39841133033667abcdb9628ca335b4b8ff0bde0f920a0edb333c3c50000000000");
+        byte[] tag_hash = sha256("TapSighash".getBytes());
+        byte[] preimage_hash = sha256(BtcService.concatBytes(tag_hash, tag_hash, sig_to_hash));
+        System.out.println(Utils.HEX.encode(preimage_hash));
     }
 }
